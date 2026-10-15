@@ -1,0 +1,5 @@
+mss>=9.0.1
+numpy>=1.26
+opencv-python>=4.10.0.84
+soundcard>=0.4.3
+imageio-ffmpeg>=0.6.0
