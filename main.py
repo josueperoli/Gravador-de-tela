@@ -1,4 +1,5 @@
 import ctypes
+import math
 import os
 import queue
 import subprocess
@@ -18,7 +19,11 @@ import soundcard
 
 
 VIDEO_SIZE = (1080, 1920)
+CUSTOM_PROFILE = "Personalizado"
+MAX_VIDEO_DIMENSION = 7680
 FPS = 30
+VIDEO_PRESET = "medium"
+VIDEO_CRF = 14
 AUDIO_SAMPLE_RATE = 48000
 AUDIO_BLOCK_SIZE = 2048
 
@@ -58,10 +63,29 @@ def fit_frame(frame, width, height):
     return cv2.resize(frame, (width, height), interpolation=interpolation)
 
 
-def centered_region(desktop):
-    ratio = VIDEO_SIZE[0] / VIDEO_SIZE[1]
-    height = int(min(desktop["height"], desktop["width"] / ratio) * 0.8)
-    width = int(height * ratio)
+def validate_custom_video_size(width, height):
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Informe a largura e a altura em pixels.") from error
+
+    if not (2 <= width <= MAX_VIDEO_DIMENSION and 2 <= height <= MAX_VIDEO_DIMENSION):
+        raise ValueError(
+            f"As dimensões devem estar entre 2 e {MAX_VIDEO_DIMENSION} pixels."
+        )
+    if width % 2 or height % 2:
+        raise ValueError("A largura e a altura precisam ser números pares.")
+    return width, height
+
+
+def centered_region(desktop, video_size=VIDEO_SIZE):
+    scale = min(
+        desktop["width"] / video_size[0],
+        desktop["height"] / video_size[1],
+    )
+    width = max(1, int(video_size[0] * scale))
+    height = max(1, int(video_size[1] * scale))
     return {
         "left": desktop["left"] + (desktop["width"] - width) // 2,
         "top": desktop["top"] + (desktop["height"] - height) // 2,
@@ -71,11 +95,11 @@ def centered_region(desktop):
 
 
 class RegionSelector:
-    def __init__(self, parent, desktop, on_select, on_cancel):
+    def __init__(self, parent, desktop, on_select, on_cancel, video_size=VIDEO_SIZE):
         self.desktop = desktop
         self.on_select = on_select
         self.on_cancel = on_cancel
-        self.region = centered_region(desktop)
+        self.region = centered_region(desktop, video_size)
         self.drag_offset = None
 
         self.window = tk.Toplevel(parent)
@@ -96,7 +120,7 @@ class RegionSelector:
             16,
             14,
             anchor="nw",
-            text="Arraste a moldura vertical para posicionar o enquadramento",
+            text="Arraste a moldura para posicionar o enquadramento",
             fill="white",
             font=("Segoe UI", 14, "bold"),
         )
@@ -214,10 +238,14 @@ class ScreenRecorderApp:
         self.recording_started = None
 
         self.profile = tk.StringVar(value="")
+        self.custom_width = tk.StringVar(value=str(VIDEO_SIZE[0]))
+        self.custom_height = tk.StringVar(value=str(VIDEO_SIZE[1]))
         self.region_text = tk.StringVar(value="Escolha um formato para posicionar")
         self.file_text = tk.StringVar(value="Nenhum arquivo escolhido")
         self.status_text = tk.StringVar(value="Pronto para gravar")
         self.timer_text = tk.StringVar(value="00:00")
+        self.custom_width.trace_add("write", self._on_custom_size_changed)
+        self.custom_height.trace_add("write", self._on_custom_size_changed)
 
         self._build_ui()
         self.root.bind_all("<Control-Alt-r>", self.toggle_recording)
@@ -236,29 +264,58 @@ class ScreenRecorderApp:
         self.profile_selector = ttk.Combobox(
             frame,
             textvariable=self.profile,
-            values=("Instagram Reels", "YouTube Shorts"),
+            values=("Instagram Reels", "YouTube Shorts", CUSTOM_PROFILE),
             state="readonly",
             width=25,
         )
         self.profile_selector.grid(row=1, column=1, sticky="ew", pady=4)
         self.profile_selector.bind("<<ComboboxSelected>>", self._on_profile_selected)
 
+        self.custom_size_frame = ttk.Frame(frame)
+        self.custom_size_frame.grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(self.custom_size_frame, text="Largura:").pack(side="left")
+        self.custom_width_input = ttk.Spinbox(
+            self.custom_size_frame,
+            from_=2,
+            to=MAX_VIDEO_DIMENSION,
+            increment=2,
+            textvariable=self.custom_width,
+            width=7,
+        )
+        self.custom_width_input.pack(side="left", padx=(6, 14))
+        ttk.Label(self.custom_size_frame, text="Altura:").pack(side="left")
+        self.custom_height_input = ttk.Spinbox(
+            self.custom_size_frame,
+            from_=2,
+            to=MAX_VIDEO_DIMENSION,
+            increment=2,
+            textvariable=self.custom_height,
+            width=7,
+        )
+        self.custom_height_input.pack(side="left", padx=(6, 0))
+        ttk.Label(
+            self.custom_size_frame,
+            text=f"pixels pares (até {MAX_VIDEO_DIMENSION})",
+            foreground="#555555",
+        ).pack(side="left", padx=(8, 0))
+        self.custom_size_frame.grid_remove()
+
         ttk.Button(
             frame, text="Posicionar enquadramento", command=self.position_region
-        ).grid(row=2, column=0, sticky="ew", pady=(10, 4))
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 4))
         ttk.Label(frame, textvariable=self.region_text, wraplength=260).grid(
-            row=2, column=1, sticky="w", padx=(10, 0), pady=(10, 4)
+            row=3, column=1, sticky="w", padx=(10, 0), pady=(10, 4)
         )
 
         ttk.Button(frame, text="Escolher arquivo de saída", command=self.choose_file).grid(
-            row=3, column=0, sticky="ew", pady=4
+            row=4, column=0, sticky="ew", pady=4
         )
         ttk.Label(frame, textvariable=self.file_text, wraplength=260).grid(
-            row=3, column=1, sticky="w", padx=(10, 0), pady=4
+            row=4, column=1, sticky="w", padx=(10, 0), pady=4
         )
 
         controls = ttk.Frame(frame)
-        controls.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(16, 8))
+        controls.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(16, 8))
         self.start_button = ttk.Button(
             controls, text="Iniciar gravação", command=self.start_recording
         )
@@ -269,36 +326,64 @@ class ScreenRecorderApp:
         self.stop_button.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         ttk.Label(frame, textvariable=self.status_text).grid(
-            row=5, column=0, sticky="w", pady=(6, 0)
+            row=6, column=0, sticky="w", pady=(6, 0)
         )
         ttk.Label(frame, textvariable=self.timer_text, font=("Segoe UI", 12, "bold")).grid(
-            row=5, column=1, sticky="e", pady=(6, 0)
+            row=6, column=1, sticky="e", pady=(6, 0)
         )
         ttk.Label(
             frame,
-            text="Ctrl+Alt+R inicia/para · 1080 × 1920 · H.264 alta qualidade · 30 FPS",
+            text="Ctrl+Alt+R inicia/para · H.264 CRF 14 · 30 FPS",
             foreground="#555555",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
     def _on_profile_selected(self, _event=None):
+        if self.profile.get() == CUSTOM_PROFILE:
+            self.custom_size_frame.grid()
+        else:
+            self.custom_size_frame.grid_remove()
         self.region = None
         self.region_text.set("Posicione o enquadramento")
         self.position_region()
 
+    def _on_custom_size_changed(self, *_args):
+        if self.profile.get() == CUSTOM_PROFILE:
+            self.region = None
+            self.region_text.set("Posicione o enquadramento")
+
+    def _selected_video_size(self):
+        if self.profile.get() == CUSTOM_PROFILE:
+            return validate_custom_video_size(
+                self.custom_width.get(), self.custom_height.get()
+            )
+        return VIDEO_SIZE
+
     def position_region(self):
         if not self.profile.get():
-            messagebox.showwarning("Formato não escolhido", "Escolha Reels ou Shorts primeiro.")
+            messagebox.showwarning(
+                "Formato não escolhido",
+                "Escolha um formato de vídeo antes de posicionar o enquadramento.",
+            )
+            return
+        try:
+            video_size = self._selected_video_size()
+        except ValueError as error:
+            messagebox.showwarning("Dimensões inválidas", str(error))
             return
         with mss.MSS() as screen:
             desktop = screen.monitors[0]
         RegionSelector(
-            self.root, desktop, self._set_region, self._cancel_region
+            self.root,
+            desktop,
+            self._set_region,
+            self._cancel_region,
+            video_size,
         )
 
     def _set_region(self, region):
         self.region = region
         self.region_text.set(
-            f"Enquadramento vertical: {region['width']} × {region['height']} pixels"
+            f"Área da tela: {region['width']} × {region['height']} pixels"
         )
 
     def _cancel_region(self):
@@ -321,7 +406,14 @@ class ScreenRecorderApp:
 
     def start_recording(self):
         if not self.profile.get():
-            messagebox.showwarning("Formato não escolhido", "Escolha Reels ou Shorts.")
+            messagebox.showwarning(
+                "Formato não escolhido", "Escolha um formato de vídeo."
+            )
+            return
+        try:
+            video_size = self._selected_video_size()
+        except ValueError as error:
+            messagebox.showwarning("Dimensões inválidas", str(error))
             return
         if self.region is None:
             messagebox.showwarning(
@@ -344,7 +436,7 @@ class ScreenRecorderApp:
 
         worker = threading.Thread(
             target=self._record,
-            args=(self.region.copy(), self.output_path, self.stop_event),
+            args=(self.region.copy(), self.output_path, self.stop_event, video_size),
             daemon=True,
         )
         worker.start()
@@ -363,9 +455,11 @@ class ScreenRecorderApp:
             self.stop_recording()
         return "break"
 
-    def _record(self, region, output_path, stop_event):
+    def _record(self, region, output_path, stop_event, video_size=VIDEO_SIZE):
         encoder = None
         audio_thread = None
+        audio_start_event = threading.Event()
+        audio_ready_event = threading.Event()
         temporary_paths = []
         succeeded = False
         try:
@@ -386,23 +480,50 @@ class ScreenRecorderApp:
             mux_temp.close()
             temporary_paths.append(Path(mux_temp.name))
 
-            encoder = self._start_video_encoder(video_temp.name)
+            encoder = self._start_video_encoder(video_temp.name, video_size)
 
             audio_errors = queue.Queue()
 
             def record_audio():
                 try:
-                    self._record_system_audio(audio_temp.name, stop_event)
+                    self._record_system_audio(
+                        audio_temp.name,
+                        stop_event,
+                        audio_start_event,
+                        audio_ready_event,
+                    )
                 except Exception as error:
                     audio_errors.put(error)
                     stop_event.set()
+                finally:
+                    audio_ready_event.set()
 
             audio_thread = threading.Thread(target=record_audio, daemon=True)
             audio_thread.start()
 
             interval = 1 / FPS
-            next_frame = time.perf_counter()
             with mss.MSS() as screen:
+                shot = np.asarray(screen.grab(region))
+                frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
+                frame = fit_frame(frame, *video_size)
+
+                audio_ready_event.wait()
+                try:
+                    audio_error = audio_errors.get_nowait()
+                except queue.Empty:
+                    audio_error = None
+                if audio_error is not None:
+                    raise RuntimeError(
+                        "Falha ao capturar o áudio do computador: "
+                        f"{audio_error}"
+                    )
+
+                recording_started = time.perf_counter()
+                audio_start_event.set()
+                encoder.stdin.write(frame.tobytes())
+                frames_written = 1
+                previous_frame = frame
+
                 while not stop_event.is_set():
                     try:
                         audio_error = audio_errors.get_nowait()
@@ -414,17 +535,26 @@ class ScreenRecorderApp:
                             f"{audio_error}"
                         )
 
+                    next_frame = recording_started + frames_written * interval
+                    delay = next_frame - time.perf_counter()
+                    if delay > 0 and stop_event.wait(delay):
+                        break
+                    if stop_event.is_set():
+                        break
+
                     shot = np.asarray(screen.grab(region))
                     frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
-                    frame = fit_frame(frame, *VIDEO_SIZE)
-                    encoder.stdin.write(frame.tobytes())
+                    frame = fit_frame(frame, *video_size)
 
-                    next_frame += interval
-                    delay = next_frame - time.perf_counter()
-                    if delay > 0:
-                        stop_event.wait(delay)
-                    else:
-                        next_frame = time.perf_counter()
+                    elapsed = time.perf_counter() - recording_started
+                    due_frame_count = self._scheduled_frame_count(
+                        elapsed, frames_written
+                    )
+                    for _ in range(frames_written, due_frame_count - 1):
+                        encoder.stdin.write(previous_frame.tobytes())
+                    encoder.stdin.write(frame.tobytes())
+                    frames_written = due_frame_count
+                    previous_frame = frame
 
             audio_thread.join()
             try:
@@ -447,6 +577,7 @@ class ScreenRecorderApp:
             self.messages.put(("error", str(error)))
         finally:
             stop_event.set()
+            audio_start_event.set()
             if encoder is not None:
                 encoder.kill()
                 encoder.communicate()
@@ -459,7 +590,11 @@ class ScreenRecorderApp:
             self.messages.put(("done", str(output_path)))
 
     @staticmethod
-    def _start_video_encoder(output_path):
+    def _scheduled_frame_count(elapsed, frames_written):
+        return max(frames_written + 1, math.ceil(elapsed * FPS))
+
+    @staticmethod
+    def _start_video_encoder(output_path, video_size=VIDEO_SIZE):
         command = [
             imageio_ffmpeg.get_ffmpeg_exe(),
             "-hide_banner",
@@ -471,7 +606,7 @@ class ScreenRecorderApp:
             "-pixel_format",
             "bgr24",
             "-video_size",
-            f"{VIDEO_SIZE[0]}x{VIDEO_SIZE[1]}",
+            f"{video_size[0]}x{video_size[1]}",
             "-framerate",
             str(FPS),
             "-i",
@@ -480,9 +615,9 @@ class ScreenRecorderApp:
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            VIDEO_PRESET,
             "-crf",
-            "16",
+            str(VIDEO_CRF),
             "-pix_fmt",
             "yuv420p",
             output_path,
@@ -508,7 +643,9 @@ class ScreenRecorderApp:
             raise RuntimeError(f"Não foi possível codificar o vídeo: {detail}")
 
     @staticmethod
-    def _record_system_audio(output_path, stop_event):
+    def _record_system_audio(
+        output_path, stop_event, start_event=None, ready_event=None
+    ):
         speaker = soundcard.default_speaker()
         if speaker is None:
             raise RuntimeError("Nenhuma saída de áudio padrão foi encontrada.")
@@ -525,6 +662,10 @@ class ScreenRecorderApp:
             with loopback.recorder(
                 samplerate=AUDIO_SAMPLE_RATE, blocksize=AUDIO_BLOCK_SIZE
             ) as recorder:
+                if ready_event is not None:
+                    ready_event.set()
+                if start_event is not None:
+                    start_event.wait()
                 while not stop_event.is_set():
                     samples = recorder.record(numframes=AUDIO_BLOCK_SIZE)
                     if samples.size == 0:
